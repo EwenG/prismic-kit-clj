@@ -301,6 +301,7 @@
        ::link-web (format "<a href=\"%s\"></a>" (:url fragment))
        ::link-image (format "<a href=\"%s\"></a>" (:url fragment))
        ::group nil
+       ::group-item nil
        ::paragraph (paragraph-as-html fragment link-resolver)
        ::heading1 (heading1-as-html fragment link-resolver)
        ::heading2 (heading2-as-html fragment link-resolver)
@@ -317,7 +318,7 @@
                (str "Unexpected type while generating HTML: " type)))))))
 
 (defn structured-text-add-list-item
-  [{:keys [path] :as context} state {:keys [type] :as value}]
+  [{path ::path :as context} state {:keys [type] :as value}]
   (let [maybe-list (peek state)
         maybe-list-type (::type (meta maybe-list))
         [list-type item-type]
@@ -342,26 +343,30 @@
         (conj state (with-meta [(with-meta value context)]
                       (assoc context ::type list-type)))))))
 
-(defn parse-view [{:keys [path] :as context} [view-name view]]
-  (let [path (conj path view-name)]
-    [view-name
-     (with-meta view (assoc context ::type ::image-view ::path path))]))
+(defn parse-view [context [view-name view]]
+  (let [context (update-in context [::path] conj view-name)]
+    [view-name (with-meta view (assoc context ::type ::image-view))]))
 
 (defn parse-image [context image]
   (let [parse-view (partial parse-view context)]
     (with-meta (into {} (map parse-view image))
-      {::type ::image})))
+      (assoc context ::type ::image))))
 
 (defn structured-text-reducer
-  [{:keys [document path] :as context} state {:keys [type] :as value}]
+  [{document ::document path ::path :as context}
+   state {:keys [type] :as value}]
   (let [index (count state)
-        path (conj path index)
-        structured-text-add-list-item
-        (partial structured-text-add-list-item (assoc context :path path))
+        {path ::path :as context} (update-in context [::path] conj index)
         state
         (case type
-          "o-list-item" (structured-text-add-list-item state value)
-          "list-item" (structured-text-add-list-item state value)
+          "o-list-item" (let [structured-text-add-list-item
+                              (partial
+                               structured-text-add-list-item context)]
+                          (structured-text-add-list-item state value))
+          "list-item" (let [structured-text-add-list-item
+                            (partial
+                             structured-text-add-list-item context)]
+                        (structured-text-add-list-item state value))
           "embed" (->> (with-meta (:oembed value) {::type ::embed})
                        (conj state))
           "image" (->> (parse-image context {:main (dissoc value :type)})
@@ -396,14 +401,27 @@
 (defn parse-structured-text [context value]
   (-> (partial structured-text-reducer context)
       (reduce [] value)
-      (with-meta {::type ::structured-text})))
+      (with-meta (assoc context ::type ::structured-text))))
 
-(defn parse-field [{:keys [document path] :as context}
+(declare parse-field)
+
+(defn parse-group-item [{path ::path context ::context} index value]
+  (let [context (update-in context [::path] conj index)
+        parse-field (partial parse-field context)]
+    (-> (into {} (map parse-field value))
+        (with-meta (assoc context ::type ::group-item)))))
+
+(defn parse-group [context value]
+  (let [parse-group-item (partial parse-group-item context)]
+    (-> (into [] (map-indexed parse-group-item value))
+        (with-meta (assoc context ::type ::group)))))
+
+(defn parse-field [{document ::document path ::path :as context}
                    [field-name {:keys [type value] :as field}]]
-  (let [path (conj path field-name)
+  (let [{path ::path :as context}
+        (update-in context [::path] conj field-name)
         field (case type
-                "StructuredText" (parse-structured-text
-                                  (assoc context ::path path) value)
+                "StructuredText" (parse-structured-text context value)
                 "Image" (parse-image context value)
                 "Embed" (with-meta (:oembed value) {::type ::embed})
                 "Text" (with-meta {:text value :spans []}
@@ -415,7 +433,7 @@
                 "Link.web" (with-meta value {::type ::link-web})
                 "Link.image" (with-meta (:image value)
                                {::type ::link-image})
-                "Group" (with-meta [] {::type ::group})
+                "Group" (parse-group context value)
                 (throw
                  (Exception. (str "Invalid prismic field type: " type))))]
     [field-name (vary-meta field assoc ::document document ::path path)]))
@@ -423,8 +441,9 @@
 (defn parse-document [{:keys [type data] :as document}]
   (let [document (get data (keyword type))
         context (-> (dissoc document :data)
-                  (assoc ::type ::document))
-        parse-field (partial parse-field {:document document})]
+                    (assoc ::type ::document))
+        parse-field (partial parse-field {::document document
+                                          ::path []})]
     (-> (into {} (map parse-field document))
         (with-meta context))))
 
