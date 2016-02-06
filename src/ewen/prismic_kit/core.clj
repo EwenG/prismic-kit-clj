@@ -277,6 +277,28 @@
       (.append structured-text-html (as-html subfield link-resolver)))
     (.toString structured-text-html)))
 
+(defn group-as-html
+  ([group]
+   (group-as-html group nil))
+  ([group link-resolver]
+   (let [group-html (StringBuilder.)]
+     (.append group-html "<div>")
+     (doseq [group-item group]
+       (.append group-html (as-html group-item link-resolver)))
+     (.append group-html "</div>")
+     (.toString group-html))))
+
+(defn slice-as-html
+  ([slice]
+   (slice-as-html slice nil))
+  ([slice link-resolver]
+   (let [slice-html (StringBuilder.)]
+     (.append slice-html "<div>")
+     (doseq [slice-item slice]
+       (.append slice-html (as-html slice-item link-resolver)))
+     (.append slice-html "</div>")
+     (.toString slice-html))))
+
 (defn document-as-html
   ([document]
    (document-as-html document nil))
@@ -294,14 +316,17 @@
      (case type
        ::document (document-as-html fragment link-resolver)
        ::structured-text (structured-text-as-html fragment link-resolver)
-       ::text (text-as-html* (:text fragment) (:spans fragment))
+       ::text (format "<p>%s</p>"
+                      (text-as-html* (:text fragment) (:spans fragment)))
        ::image (image-view-as-html (:main fragment))
        ::embed (:html fragment)
        ::link-document (document-link-as-html fragment link-resolver)
        ::link-web (format "<a href=\"%s\"></a>" (:url fragment))
        ::link-image (format "<a href=\"%s\"></a>" (:url fragment))
-       ::group nil
-       ::group-item nil
+       ::group (group-as-html fragment link-resolver)
+       ;;group-items and documents have the same structure
+       ::group-item (document-as-html fragment link-resolver)
+       ::slice (slice-as-html fragment link-resolver)
        ::paragraph (paragraph-as-html fragment link-resolver)
        ::heading1 (heading1-as-html fragment link-resolver)
        ::heading2 (heading2-as-html fragment link-resolver)
@@ -403,9 +428,10 @@
       (reduce [] value)
       (with-meta (assoc context ::type ::structured-text))))
 
+(declare parse-field*)
 (declare parse-field)
 
-(defn parse-group-item [{path ::path context ::context} index value]
+(defn parse-group-item [context index value]
   (let [context (update-in context [::path] conj index)
         parse-field (partial parse-field context)]
     (-> (into {} (map parse-field value))
@@ -416,27 +442,46 @@
     (-> (into [] (map-indexed parse-group-item value))
         (with-meta (assoc context ::type ::group)))))
 
-(defn parse-field [{document ::document path ::path :as context}
+(defn parse-slice-item [context index {:keys [value] :as slice-item}]
+  (let [parse-field* (partial parse-field* context)
+        other-meta (dissoc slice-item :type :value)
+        meta-updater (fn [m] (-> (update-in m [::path] conj index)
+                                 (merge other-meta)))]
+    (-> (parse-field* value)
+        (vary-meta meta-updater))))
+
+(defn parse-slice [context value]
+  (let [parse-slice-item (partial parse-slice-item context)]
+    (-> (into [] (map-indexed parse-slice-item value))
+        (with-meta (assoc context ::type ::slice)))))
+
+(defn parse-field* [{document ::document :as context}
+                    {:keys [type value] :as field}]
+  (-> (case type
+        "StructuredText" (parse-structured-text context value)
+        "Image" (parse-image context value)
+        "Embed" (with-meta (:oembed value) {::type ::embed})
+        "Text" (with-meta {:text value :spans []}
+                 {::type ::text})
+        "Link.document" (-> (:document value)
+                            (merge (dissoc value :document))
+                            (rename-keys {:isBroken :is-broken})
+                            (with-meta {::type ::link-document}))
+        "Link.web" (with-meta value {::type ::link-web})
+        "Link.image" (with-meta (:image value)
+                       {::type ::link-image})
+        "Group" (parse-group context value)
+        "SliceZone" (parse-slice context value)
+        (throw
+         (Exception. (str "Invalid prismic field type: " type))))
+      (vary-meta assoc ::document document)))
+
+(defn parse-field [{path ::path :as context}
                    [field-name {:keys [type value] :as field}]]
   (let [{path ::path :as context}
         (update-in context [::path] conj field-name)
-        field (case type
-                "StructuredText" (parse-structured-text context value)
-                "Image" (parse-image context value)
-                "Embed" (with-meta (:oembed value) {::type ::embed})
-                "Text" (with-meta {:text value :spans []}
-                         {::type ::text})
-                "Link.document" (-> (:document value)
-                                    (merge (dissoc value :document))
-                                    (rename-keys {:isBroken :is-broken})
-                                    (with-meta {::type ::link-document}))
-                "Link.web" (with-meta value {::type ::link-web})
-                "Link.image" (with-meta (:image value)
-                               {::type ::link-image})
-                "Group" (parse-group context value)
-                (throw
-                 (Exception. (str "Invalid prismic field type: " type))))]
-    [field-name (vary-meta field assoc ::document document ::path path)]))
+        field (parse-field* context field)]
+    [field-name (vary-meta field assoc ::path path)]))
 
 (defn parse-document [{:keys [type data] :as document}]
   (let [document (get data (keyword type))
@@ -483,122 +528,67 @@
 
   (parse-document
    {:id "Vq51byQAAEMxi9qn",
-    :uid "titre1",
-    :type "document1",
-    :href
-    "https://blogtemplateegr.cdn.prismic.io/api/documents/search?ref=VrYAvigAAEAAxiJO&q=%5B%5B%3Ad+%3D+at%28document.id%2C+%22Vq51byQAAEMxi9qn%22%29+%5D%5D",
-    :tags [],
-    :slugs ["titre1"],
-    :linked_documents
-    [{:id "Vq51byQAAEMxi9qn",
-      :tags [],
-      :type "document1",
-      :slug "titre1"}
-     {:id "Vq51byQAAEMxi9qn",
-      :tags [],
-      :type "document1",
-      :slug "titre1"}],
-    :data
-    {:document1
-     {:tt {:type "Text", :value "hhh"},
-      :title1
-      {:type "StructuredText",
-       :value [{:type "heading1", :text "Titre1", :spans []}]},
-      :content1
-      {:type "StructuredText",
-       :value
-       [{:type "paragraph",
-         :text "text text ff link e ddd",
-         :spans
-         [{:start 5, :end 6, :type "strong"}
-          {:start 6, :end 8, :type "strong"}
-          {:start 6, :end 8, :type "em"}
-          {:start 8, :end 9, :type "strong"}
-          {:start 10, :end 11, :type "em"}
-          {:start 11, :end 13, :type "em"}
-          {:start 11, :end 13, :type "strong"}
-          {:start 13,
-           :end 17,
-           :type "hyperlink",
-           :data
-           {:type "Link.document",
-            :value
-            {:document
-             {:id "Vq51byQAAEMxi9qn",
-              :type "document1",
-              :tags [],
-              :slug "titre1",
-              :uid "titre1"},
-             :isBroken false}}}
-          {:start 13, :end 17, :type "em"}
-          {:start 13, :end 17, :type "strong"}
-          {:start 17, :end 21, :type "strong"}],
-         :direction "rtl"}
-        {:type "o-list-item", :text "fff", :spans []}
-        {:type "o-list-item", :text "dffd", :spans []}
-        {:type "list-item", :text "ss", :spans []}
-        {:type "list-item", :text "ddd", :spans []}
-        {:type "embed",
-         :oembed
-         {:author_url "https://www.youtube.com/user/malakoffmederic",
-          :thumbnail_height 360,
-          :thumbnail_url
-          "https://i.ytimg.com/vi/H5N-xL2STKs/hqdefault.jpg",
-          :width 480,
-          :type "video",
-          :embed_url "https://youtu.be/H5N-xL2STKs",
-          :title "Campagne Malakoff Médéric 2014",
-          :provider_name "YouTube",
-          :author_name "Malakoff Médéric",
-          :thumbnail_width 480,
-          :version "1.0",
-          :provider_url "https://www.youtube.com/",
-          :height 270,
-          :html
-          "<iframe width=\"480\" height=\"270\" src=\"https://www.youtube.com/embed/H5N-xL2STKs?feature=oembed\" frameborder=\"0\" allowfullscreen></iframe>"}}
-        {:type "image",
-         :url
-         "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
-         :alt "",
-         :copyright "",
-         :dimensions {:width 960, :height 800}}
-        {:type "paragraph", :text "P2", :spans []}]},
-      :content2
-      {:type "Image",
-       :value
-       {:main
-        {:url
-         "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
-         :alt "",
-         :copyright "",
-         :dimensions {:width 1500, :height 500}},
-        :views
-        {:medium
-         {:url
-          "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
-          :alt "",
-          :copyright "",
-          :dimensions {:width 800, :height 250}},
-         :icon
-         {:url
-          "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
-          :alt "",
-          :copyright "",
-          :dimensions {:width 250, :height 250}}}}},
-      :link1
-      {:type "Link.document",
-       :value
-       {:document
-        {:id "Vq51byQAAEMxi9qn",
-         :type "document1",
-         :tags [],
-         :slug "titre1",
-         :uid "titre1"},
-        :isBroken false}},
-      :embed1
-      {:type "Embed",
-       :value
-       {:oembed
+   :uid "titre1",
+   :type "document1",
+   :href
+   "https://blogtemplateegr.cdn.prismic.io/api/documents/search?ref=VrZktigAADgAyHll&q=%5B%5B%3Ad+%3D+at%28document.id%2C+%22Vq51byQAAEMxi9qn%22%29+%5D%5D",
+   :tags [],
+   :slugs ["titre1"],
+   :linked_documents
+   [{:id "Vq51byQAAEMxi9qn",
+     :tags [],
+     :type "document1",
+     :slug "titre1"}
+    {:id "Vq51byQAAEMxi9qn",
+     :tags [],
+     :type "document1",
+     :slug "titre1"}
+    {:id "Vq51byQAAEMxi9qn",
+     :tags [],
+     :type "document1",
+     :slug "titre1"}],
+   :data
+   {:document1
+    {:tt {:type "Text", :value "hhh"},
+     :title1
+     {:type "StructuredText",
+      :value [{:type "heading1", :text "Titre1", :spans []}]},
+     :content1
+     {:type "StructuredText",
+      :value
+      [{:type "paragraph",
+        :text "text text ff link e ddd",
+        :spans
+        [{:start 5, :end 6, :type "strong"}
+         {:start 6, :end 8, :type "strong"}
+         {:start 6, :end 8, :type "em"}
+         {:start 8, :end 9, :type "strong"}
+         {:start 10, :end 11, :type "em"}
+         {:start 11, :end 13, :type "em"}
+         {:start 11, :end 13, :type "strong"}
+         {:start 13,
+          :end 17,
+          :type "hyperlink",
+          :data
+          {:type "Link.document",
+           :value
+           {:document
+            {:id "Vq51byQAAEMxi9qn",
+             :type "document1",
+             :tags [],
+             :slug "titre1",
+             :uid "titre1"},
+            :isBroken false}}}
+         {:start 13, :end 17, :type "em"}
+         {:start 13, :end 17, :type "strong"}
+         {:start 17, :end 21, :type "strong"}],
+        :direction "rtl"}
+       {:type "o-list-item", :text "fff", :spans []}
+       {:type "o-list-item", :text "dffd", :spans []}
+       {:type "list-item", :text "ss", :spans []}
+       {:type "list-item", :text "ddd", :spans []}
+       {:type "embed",
+        :oembed
         {:author_url "https://www.youtube.com/user/malakoffmederic",
          :thumbnail_height 360,
          :thumbnail_url
@@ -614,33 +604,150 @@
          :provider_url "https://www.youtube.com/",
          :height 270,
          :html
-         "<iframe width=\"480\" height=\"270\" src=\"https://www.youtube.com/embed/H5N-xL2STKs?feature=oembed\" frameborder=\"0\" allowfullscreen></iframe>"}}},
-      :gallery
-      {:type "Group",
-       :value
-       [{:picture
-         {:type "Image",
-          :value
-          {:main
+         "<iframe width=\"480\" height=\"270\" src=\"https://www.youtube.com/embed/H5N-xL2STKs?feature=oembed\" frameborder=\"0\" allowfullscreen></iframe>"}}
+       {:type "image",
+        :url
+        "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
+        :alt "",
+        :copyright "",
+        :dimensions {:width 960, :height 800}}
+       {:type "paragraph", :text "P2", :spans []}]},
+     :content2
+     {:type "Image",
+      :value
+      {:main
+       {:url
+        "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
+        :alt "",
+        :copyright "",
+        :dimensions {:width 1500, :height 500}},
+       :views
+       {:medium
+        {:url
+         "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
+         :alt "",
+         :copyright "",
+         :dimensions {:width 800, :height 250}},
+        :icon
+        {:url
+         "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
+         :alt "",
+         :copyright "",
+         :dimensions {:width 250, :height 250}}}}},
+     :link1
+     {:type "Link.document",
+      :value
+      {:document
+       {:id "Vq51byQAAEMxi9qn",
+        :type "document1",
+        :tags [],
+        :slug "titre1",
+        :uid "titre1"},
+       :isBroken false}},
+     :embed1
+     {:type "Embed",
+      :value
+      {:oembed
+       {:author_url "https://www.youtube.com/user/malakoffmederic",
+        :thumbnail_height 360,
+        :thumbnail_url
+        "https://i.ytimg.com/vi/H5N-xL2STKs/hqdefault.jpg",
+        :width 480,
+        :type "video",
+        :embed_url "https://youtu.be/H5N-xL2STKs",
+        :title "Campagne Malakoff Médéric 2014",
+        :provider_name "YouTube",
+        :author_name "Malakoff Médéric",
+        :thumbnail_width 480,
+        :version "1.0",
+        :provider_url "https://www.youtube.com/",
+        :height 270,
+        :html
+        "<iframe width=\"480\" height=\"270\" src=\"https://www.youtube.com/embed/H5N-xL2STKs?feature=oembed\" frameborder=\"0\" allowfullscreen></iframe>"}}},
+     :gallery
+     {:type "Group",
+      :value
+      [{:picture
+        {:type "Image",
+         :value
+         {:main
+          {:url
+           "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
+           :alt "",
+           :copyright "",
+           :dimensions {:width 960, :height 800}},
+          :views
+          {:regular
            {:url
             "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
             :alt "",
             :copyright "",
-            :dimensions {:width 960, :height 800}},
-           :views
-           {:regular
-            {:url
-             "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
-             :alt "",
-             :copyright "",
-             :dimensions {:width 800, :height 500}},
-            :icon
-            {:url
-             "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
-             :alt "",
-             :copyright "",
-             :dimensions {:width 50, :height 50}}}}},
-         :caption {:type "Text", :value "caption"}}]}}}})
+            :dimensions {:width 800, :height 500}},
+           :icon
+           {:url
+            "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
+            :alt "",
+            :copyright "",
+            :dimensions {:width 50, :height 50}}}}},
+        :caption {:type "Text", :value "caption"}}
+       {:picture
+        {:type "Image",
+         :value
+         {:main
+          {:url
+           "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
+           :alt "",
+           :copyright "",
+           :dimensions {:width 960, :height 800}},
+          :views
+          {:regular
+           {:url
+            "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
+            :alt "",
+            :copyright "",
+            :dimensions {:width 800, :height 500}},
+           :icon
+           {:url
+            "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
+            :alt "",
+            :copyright "",
+            :dimensions {:width 50, :height 50}}}}},
+        :caption {:type "Text", :value "caption2"}}]},
+     :body
+     {:type "SliceZone",
+      :value
+      [{:type "Slice",
+        :slice_type "featured-items",
+        :slice_label nil,
+        :value
+        {:type "Group",
+         :value
+         [{:illustration
+           {:type "Image",
+            :value
+            {:main
+             {:url
+              "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
+              :alt "",
+              :copyright "",
+              :dimensions {:width 1200, :height 1200}},
+             :views
+             {:icon
+              {:url
+               "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
+               :alt "",
+               :copyright "",
+               :dimensions {:width 300, :height 300}}}}},
+           :read-more
+           {:type "Link.document",
+            :value
+            {:document
+             {:id "Vq51byQAAEMxi9qn",
+              :type "document1",
+              :tags [],
+              :slug "titre1",
+              :uid "titre1"},
+             :isBroken false}}}]}}]}}}})
 
   (as-html *1)
 
