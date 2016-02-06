@@ -372,8 +372,10 @@
   (let [context (update-in context [::path] conj view-name)]
     [view-name (with-meta view (assoc context ::type ::image-view))]))
 
-(defn parse-image [context image]
-  (let [parse-view (partial parse-view context)]
+(defn parse-image [context {:keys [views] :as image}]
+  (let [image (-> (dissoc image :views)
+                  (merge views))
+        parse-view (partial parse-view context)]
     (with-meta (into {} (map parse-view image))
       (assoc context ::type ::image))))
 
@@ -392,36 +394,36 @@
                             (partial
                              structured-text-add-list-item context)]
                         (structured-text-add-list-item state value))
-          "embed" (->> (with-meta (:oembed value) {::type ::embed})
+          "embed" (->> (with-meta (:oembed value)
+                         (assoc context ::type ::embed))
                        (conj state))
           "image" (->> (parse-image context {:main (dissoc value :type)})
                        (conj state))
           "paragraph" (->> (with-meta (dissoc value :type)
-                             {::type ::paragraph})
+                             (assoc context ::type ::paragraph))
                            (conj state))
           "heading1" (->> (with-meta (dissoc value :type)
-                            {::type ::heading1})
+                            (assoc context ::type ::heading1))
                           (conj state))
           "heading2" (->> (with-meta (dissoc value :type)
-                            {::type ::heading2})
+                            (assoc context ::type ::heading2))
                           (conj state))
           "heading3" (->> (with-meta (dissoc value :type)
-                            {::type ::heading3})
+                            (assoc context ::type ::heading3))
                           (conj state))
           "heading4" (->> (with-meta (dissoc value :type)
-                            {::type ::heading4})
+                            (assoc context ::type ::heading4))
                           (conj state))
           "heading5" (->> (with-meta (dissoc value :type)
-                            {::type ::heading5})
+                            (assoc context ::type ::heading5))
                           (conj state))
           "heading6" (->> (with-meta (dissoc value :type)
-                            {::type ::heading6})
+                            (assoc context ::type ::heading6))
                           (conj state))
           (throw
            (str "Error while parsing StructuredText. Unknown type: "
                 type)))]
-    (conj (pop state)
-          (vary-meta (peek state) assoc ::document document ::path path))))
+    (conj (pop state) (peek state))))
 
 (defn parse-structured-text [context value]
   (-> (partial structured-text-reducer context)
@@ -443,45 +445,43 @@
         (with-meta (assoc context ::type ::group)))))
 
 (defn parse-slice-item [context index {:keys [value] :as slice-item}]
-  (let [parse-field* (partial parse-field* context)
-        other-meta (dissoc slice-item :type :value)
-        meta-updater (fn [m] (-> (update-in m [::path] conj index)
-                                 (merge other-meta)))]
+  (let [context (update-in context [::path] conj index)
+        parse-field* (partial parse-field* context)
+        other-meta (dissoc slice-item :type :value)]
     (-> (parse-field* value)
-        (vary-meta meta-updater))))
+        (vary-meta merge other-meta))))
 
 (defn parse-slice [context value]
   (let [parse-slice-item (partial parse-slice-item context)]
     (-> (into [] (map-indexed parse-slice-item value))
         (with-meta (assoc context ::type ::slice)))))
 
-(defn parse-field* [{document ::document :as context}
-                    {:keys [type value] :as field}]
-  (-> (case type
-        "StructuredText" (parse-structured-text context value)
-        "Image" (parse-image context value)
-        "Embed" (with-meta (:oembed value) {::type ::embed})
-        "Text" (with-meta {:text value :spans []}
-                 {::type ::text})
-        "Link.document" (-> (:document value)
-                            (merge (dissoc value :document))
-                            (rename-keys {:isBroken :is-broken})
-                            (with-meta {::type ::link-document}))
-        "Link.web" (with-meta value {::type ::link-web})
-        "Link.image" (with-meta (:image value)
-                       {::type ::link-image})
-        "Group" (parse-group context value)
-        "SliceZone" (parse-slice context value)
-        (throw
-         (Exception. (str "Invalid prismic field type: " type))))
-      (vary-meta assoc ::document document)))
+(defn parse-field* [context {:keys [type value] :as field}]
+  (case type
+    "StructuredText" (parse-structured-text context value)
+    "Image" (parse-image context value)
+    "Embed" (with-meta (:oembed value) (assoc context ::type ::embed))
+    "Text" (with-meta {:text value :spans []}
+             (assoc context ::type ::text))
+    "Link.document" (-> (:document value)
+                        (merge (dissoc value :document))
+                        (rename-keys {:isBroken :is-broken})
+                        (with-meta
+                          (assoc context ::type ::link-document)))
+    "Link.web" (with-meta value (assoc context ::type ::link-web))
+    "Link.image" (with-meta (:image value)
+                   (assoc context ::type ::link-image))
+    "Group" (parse-group context value)
+    "SliceZone" (parse-slice context value)
+    (throw
+     (Exception. (str "Invalid prismic field type: " type)))))
 
 (defn parse-field [{path ::path :as context}
                    [field-name {:keys [type value] :as field}]]
   (let [{path ::path :as context}
         (update-in context [::path] conj field-name)
         field (parse-field* context field)]
-    [field-name (vary-meta field assoc ::path path)]))
+    [field-name field]))
 
 (defn parse-document [{:keys [type data] :as document}]
   (let [document (get data (keyword type))
