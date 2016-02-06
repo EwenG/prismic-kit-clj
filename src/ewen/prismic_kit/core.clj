@@ -1,18 +1,8 @@
 (ns ewen.prismic-kit.core
-  (:require [ewen.prismic-kit.fragment :refer
-             [Html fragment-as-html ->List ->OList map->Paragraph
-              map->Heading1 map->Heading2 map->Heading3 map->Heading4
-              map->Heading5 map->Heading6 map->Embed ->Image
-              map->DocumentLink ->StructuredText map->Image ->Text
-              map->WebLink map->ImageLink map->Document]]
-            [clj-http.client :as http-client]
+  (:require [clj-http.client :as http-client]
             [clojure.set :refer [rename-keys]]
             [slingshot.slingshot :refer [try+ throw+]]
-            [clojure.pprint :refer [pp pprint]])
-  (:import [ewen.prismic_kit.fragment
-            Paragraph Heading1 Heading2 Heading3 Heading4 Heading5 Heading6
-            Embed Image List OList StructuredText Text DocumentLink
-            WebLink ImageLink Document]))
+            [clojure.pprint :refer [pp pprint]]))
 
 (defn span-with-offset [span offset]
   (-> (update-in span [:start] - offset)
@@ -254,238 +244,189 @@
                            (text-as-html text spans link-resolver)
                            (text-as-html text spans)))))
 
-(defn image-as-html [{{url :url alt :alt} :main}]
+(defn image-view-as-html [{:keys [url alt]}]
   (format "<img src=\"%s\" alt=\"%s\">" url alt))
 
-(defn list-as-html [{:keys [items]}]
+(defn list-item-as-html [{:keys [text spans]} link-resolver]
+  (let [list-html (StringBuilder.)]
+    (.append list-html "<li>")
+    (.append list-html (text-as-html text spans link-resolver))
+    (.append list-html "</li>")
+    (.toString list-html)))
+
+(defn list-as-html [items link-resolver]
   (let [list-html (StringBuilder.)]
     (.append list-html "<ul>")
-    (doseq [{:keys [text spans]} items]
-      (.append list-html "<li>")
-      (.append list-html (text-as-html text spans))
-      (.append list-html "</li>"))
+    (doseq [item items]
+      (.append list-html (as-html item link-resolver)))
     (.append list-html "</ul>")
     (.toString list-html)))
 
-(defn olist-as-html [{:keys [items]}]
+(defn o-list-as-html [items link-resolver]
   (let [list-html (StringBuilder.)]
     (.append list-html "<ol>")
-    (doseq [{:keys [text spans]} items]
-      (.append list-html "<li>")
-      (.append list-html (text-as-html text spans))
-      (.append list-html "</li>"))
+    (doseq [item items]
+      (.append list-html (as-html item link-resolver)))
     (.append list-html "</ol>")
     (.toString list-html)))
 
-(defn structured-text-as-html*
-  ([fragment]
-   (structured-text-as-html* fragment nil))
-  ([fragment link-resolver]
-   (if (satisfies? Html fragment)
-     (if link-resolver
-       (fragment-as-html fragment link-resolver)
-       (fragment-as-html fragment))
-     (condp instance? fragment
-       Paragraph (paragraph-as-html fragment link-resolver)
-       Heading1 (heading1-as-html fragment)
-       Heading2 (heading2-as-html fragment)
-       Heading3 (heading3-as-html fragment)
-       Heading4 (heading4-as-html fragment)
-       Heading5 (heading5-as-html fragment)
-       Heading6 (heading6-as-html fragment)
-       Embed (:html fragment)
-       Image (image-as-html fragment)
-       List (list-as-html fragment)
-       OList (olist-as-html fragment)
-       (throw (Exception.
-               (str "Unexpected type while generation HTML: "
-                    (type fragment))))))))
-
-(defmulti structured-text-as-html
-  (fn [document-type field-name field & args]
-    [document-type field-name (type field)]))
-
-(defmethod structured-text-as-html :default
-  ([document-type field-name field]
-   (structured-text-as-html* field))
-  ([document-type field-name field link-resolver]
-   (structured-text-as-html* field link-resolver)))
-
-(defn structured-text-field-as-html
-  [{:keys [value] :as structured-text} link-resolver]
+(defn structured-text-as-html
+  [structured-text link-resolver]
   (let [structured-text-html (StringBuilder.)]
-    (doseq [val value]
-      (.append structured-text-html (as-html val link-resolver)))
+    (doseq [subfield structured-text]
+      (.append structured-text-html (as-html subfield link-resolver)))
     (.toString structured-text-html)))
 
-(defn field-as-html*
-  ([field]
-   (field-as-html* field nil))
-  ([field link-resolver]
-   (if (satisfies? Html field)
-     (if link-resolver
-       (fragment-as-html field link-resolver)
-       (fragment-as-html field))
-     (condp instance? field
-       StructuredText (structured-text-field-as-html field link-resolver)
-       Image (image-as-html field)
-       Embed (:html field)
-       Text (format "<p>%s</p>" (:value field))
-       DocumentLink (document-link-as-html field link-resolver)
-       WebLink (format "<a href=\"%s\"></a>" (:url field))
-       ImageLink (format "<a href=\"%s\"></a>" (:url field))
-       (throw (Exception.
-               (str "Unexpected type while generating html: "
-                    (type field))))))))
-
-(defmulti field-as-html (fn [document-type field-name field & args]
-                          [document-type field-name]))
-
-(defmethod field-as-html :default
-  ([document-type field-name field]
-   (field-as-html* field))
-  ([document-type field-name field link-resolver]
-   (field-as-html* field link-resolver)))
-
-(defn document-as-html*
+(defn document-as-html
   ([document]
-   (document-as-html* document nil))
-  ([{:keys [type data] :as document} link-resolver]
-   (if (satisfies? Html document)
-     (if link-resolver
-       (fragment-as-html document link-resolver)
-       (fragment-as-html document))
-     (let [document-html (StringBuilder.)]
-       (doseq [[field-name field] data]
-         (.append document-html (as-html field link-resolver)))
-       (.toString document-html)))))
-
-(defmulti document-as-html (fn [document-type document & args]
-                             document-type))
-
-(defmethod document-as-html :default
-  ([document-type document]
-   (document-as-html* document))
-  ([document-type document link-resolver]
-   (document-as-html* document link-resolver)))
+   (document-as-html document nil))
+  ([document link-resolver]
+   (let [document-html (StringBuilder.)]
+     (doseq [[field-name field] document]
+       (.append document-html (as-html field link-resolver)))
+     (.toString document-html))))
 
 (defn as-html
   ([fragment]
    (as-html fragment nil))
   ([fragment link-resolver]
-   (let [{:keys [document-type field-name in-structured-text?]} fragment]
-     (condp instance? fragment
-       Document (document-as-html document-type fragment link-resolver)
-       StructuredText (field-as-html
-                       document-type field-name
-                       fragment link-resolver)
-       Text (field-as-html document-type field-name fragment)
-       DocumentLink (field-as-html
-                     document-type field-name fragment link-resolver)
-       WebLink (field-as-html document-type field-name fragment)
-       ImageLink (field-as-html document-type field-name fragment)
-       Image (if in-structured-text?
-               (structured-text-as-html
-                document-type field-name fragment link-resolver)
-               (field-as-html document-type field-name fragment))
-       Embed (if in-structured-text?
-               (structured-text-as-html
-                document-type field-name fragment link-resolver)
-               (field-as-html document-type field-name fragment))
-       Paragraph (structured-text-as-html
-                  document-type field-name fragment link-resolver)
-       Heading1 (structured-text-as-html
-                 document-type field-name fragment)
-       Heading2 (structured-text-as-html
-                 document-type field-name fragment)
-       Heading3 (structured-text-as-html
-                 document-type field-name fragment)
-       Heading4 (structured-text-as-html
-                 document-type field-name fragment)
-       Heading5 (structured-text-as-html
-                 document-type field-name fragment)
-       Heading6 (structured-text-as-html
-                 document-type field-name fragment)
-       List (structured-text-as-html
-             document-type field-name fragment)
-       OList (structured-text-as-html
-              document-type field-name fragment)
+   (let [{type ::type} (meta fragment)]
+     (case type
+       ::document (document-as-html fragment link-resolver)
+       ::structured-text (structured-text-as-html fragment link-resolver)
+       ::text (text-as-html* (:text fragment) (:spans fragment))
+       ::image (image-view-as-html (:main fragment))
+       ::embed (:html fragment)
+       ::link-document (document-link-as-html fragment link-resolver)
+       ::link-web (format "<a href=\"%s\"></a>" (:url fragment))
+       ::link-image (format "<a href=\"%s\"></a>" (:url fragment))
+       ::group nil
+       ::paragraph (paragraph-as-html fragment link-resolver)
+       ::heading1 (heading1-as-html fragment link-resolver)
+       ::heading2 (heading2-as-html fragment link-resolver)
+       ::heading3 (heading3-as-html fragment link-resolver)
+       ::heading4 (heading4-as-html fragment link-resolver)
+       ::heading5 (heading5-as-html fragment link-resolver)
+       ::heading6 (heading6-as-html fragment link-resolver)
+       ::o-list (o-list-as-html fragment link-resolver)
+       ::o-list-item (list-item-as-html fragment link-resolver)
+       ::list (list-as-html fragment link-resolver)
+       ::list-item (list-item-as-html fragment link-resolver)
+       ::image-view (image-view-as-html fragment)
        (throw (Exception.
-               (str "Unexpected type while generation HTML: "
-                    (type fragment))))))))
+               (str "Unexpected type while generating HTML: " type)))))))
 
-(defn structured-text-add-list-item [state {:keys [type] :as value}]
-  (let [maybe-list (peek state)]
+(defn structured-text-add-list-item
+  [{:keys [path] :as context} state {:keys [type] :as value}]
+  (let [maybe-list (peek state)
+        maybe-list-type (::type (meta maybe-list))
+        [list-type item-type]
+        (cond (= "list-item" type) [::list ::list-item]
+              (= "o-list-item" type) [::o-list ::o-list-item]
+              :else
+              (throw
+               (Exception.
+                (str
+                 "Error while parsing list items. Unexpected type: "
+                 type))))
+        value (dissoc value :type)]
     (cond
-      (or (and (= "list-item" type) (instance? List maybe-list))
-          (and (= "o-list-item" type) (instance? OList maybe-list)))
-      (conj (pop state)
-            (update-in maybe-list [:items] conj value))
-      (= "list-item" type)
-      (conj state (->List [value]))
-      (= "o-list-item" type)
-      (conj state (->OList [value]))
+      (or (and (= ::list-item item-type) (= maybe-list-type ::list))
+          (and (= ::o-list-item item-type) (= maybe-list-type ::o-list)))
+      (let [path (conj path (count maybe-list))
+            context (assoc context ::type item-type ::path path)]
+        (->> (conj maybe-list (with-meta value context))
+             (conj (pop state))))
       :else
-      (throw
-       (Exception.
-        (str "Error while parsing StructuredText list item. Unknown type: "
-             type))))))
+      (let [context (assoc context ::type item-type ::path (conj path 0))]
+        (conj state (with-meta [(with-meta value context)]
+                      (assoc context ::type list-type)))))))
+
+(defn parse-view [{:keys [path] :as context} [view-name view]]
+  (let [path (conj path view-name)]
+    [view-name
+     (with-meta view (assoc context ::type ::image-view ::path path))]))
+
+(defn parse-image [context image]
+  (let [parse-view (partial parse-view context)]
+    (with-meta (into {} (map parse-view image))
+      {::type ::image})))
 
 (defn structured-text-reducer
-  [document-type field-name state {:keys [type text spans] :as value}]
-  (let [state
+  [{:keys [document path] :as context} state {:keys [type] :as value}]
+  (let [index (count state)
+        path (conj path index)
+        structured-text-add-list-item
+        (partial structured-text-add-list-item (assoc context :path path))
+        state
         (case type
           "o-list-item" (structured-text-add-list-item state value)
           "list-item" (structured-text-add-list-item state value)
-          "embed" (conj state (-> (:oembed value)
-                                  (rename-keys {:type :embed_type})
-                                  (merge (dissoc value :oembed))
-                                  map->Embed))
-          "image" (conj state (->Image value))
-          "paragraph" (conj state (map->Paragraph value))
-          "heading1" (conj state (map->Heading1 value))
-          "heading2" (conj state (map->Heading2 value))
-          "heading3" (conj state (map->Heading3 value))
-          "heading4" (conj state (map->Heading4 value))
-          "heading5" (conj state (map->Heading5 value))
-          "heading6" (conj state (map->Heading6 value))
+          "embed" (->> (with-meta (:oembed value) {::type ::embed})
+                       (conj state))
+          "image" (->> (parse-image context {:main (dissoc value :type)})
+                       (conj state))
+          "paragraph" (->> (with-meta (dissoc value :type)
+                             {::type ::paragraph})
+                           (conj state))
+          "heading1" (->> (with-meta (dissoc value :type)
+                            {::type ::heading1})
+                          (conj state))
+          "heading2" (->> (with-meta (dissoc value :type)
+                            {::type ::heading2})
+                          (conj state))
+          "heading3" (->> (with-meta (dissoc value :type)
+                            {::type ::heading3})
+                          (conj state))
+          "heading4" (->> (with-meta (dissoc value :type)
+                            {::type ::heading4})
+                          (conj state))
+          "heading5" (->> (with-meta (dissoc value :type)
+                            {::type ::heading5})
+                          (conj state))
+          "heading6" (->> (with-meta (dissoc value :type)
+                            {::type ::heading6})
+                          (conj state))
           (throw
            (str "Error while parsing StructuredText. Unknown type: "
                 type)))]
-    (conj (pop state) (assoc (peek state)
-                             :in-structured-text? true
-                             :document-type document-type
-                             :field-name field-name))))
+    (conj (pop state)
+          (vary-meta (peek state) assoc ::document document ::path path))))
 
-(defn parse-structured-text [document-type field-name value]
-  (-> (partial structured-text-reducer document-type field-name)
+(defn parse-structured-text [context value]
+  (-> (partial structured-text-reducer context)
       (reduce [] value)
-      ->StructuredText))
+      (with-meta {::type ::structured-text})))
 
-(defn parse-field [document-type [field-name {:keys [type value]}]]
-  (let [field (case type
+(defn parse-field [{:keys [document path] :as context}
+                   [field-name {:keys [type value] :as field}]]
+  (let [path (conj path field-name)
+        field (case type
                 "StructuredText" (parse-structured-text
-                                  document-type field-name value)
-                "Image" (map->Image value)
-                "Embed" (map->Embed (:oembed value))
-                "Text" (->Text value)
+                                  (assoc context ::path path) value)
+                "Image" (parse-image context value)
+                "Embed" (with-meta (:oembed value) {::type ::embed})
+                "Text" (with-meta {:text value :spans []}
+                         {::type ::text})
                 "Link.document" (-> (:document value)
                                     (merge (dissoc value :document))
                                     (rename-keys {:isBroken :is-broken})
-                                    map->DocumentLink)
-                "Link.web" (map->WebLink value)
-                "Link.image" (map->ImageLink (:image value))
+                                    (with-meta {::type ::link-document}))
+                "Link.web" (with-meta value {::type ::link-web})
+                "Link.image" (with-meta (:image value)
+                               {::type ::link-image})
+                "Group" (with-meta [] {::type ::group})
                 (throw
                  (Exception. (str "Invalid prismic field type: " type))))]
-    [field-name (assoc field
-                       :document-type document-type
-                       :field-name field-name)]))
+    [field-name (vary-meta field assoc ::document document ::path path)]))
 
-(defn parse-document [{:keys [type] :as document}]
-  (let [parse-field (partial parse-field type)]
-    (map->Document
-     (update-in document [:data]
-                #(into {} (map parse-field (get % (keyword type))))))))
+(defn parse-document [{:keys [type data] :as document}]
+  (let [document (get data (keyword type))
+        context (-> (dissoc document :data)
+                  (assoc ::type ::document))
+        parse-field (partial parse-field {:document document})]
+    (-> (into {} (map parse-field document))
+        (with-meta context))))
 
 (defn api [{:keys [url token]}]
   (let [{:keys [status body] :as resp}
@@ -523,59 +464,122 @@
 
   (parse-document
    {:id "Vq51byQAAEMxi9qn",
-   :uid "titre1",
-   :type "document1",
-   :href
-   "https://blogtemplateegr.cdn.prismic.io/api/documents/search?ref=VrUggSgAADwAwOh7&q=%5B%5B%3Ad+%3D+at%28document.id%2C+%22Vq51byQAAEMxi9qn%22%29+%5D%5D",
-   :tags [],
-   :slugs ["titre1"],
-   :linked_documents
-   [{:id "Vq51byQAAEMxi9qn",
-     :tags [],
-     :type "document1",
-     :slug "titre1"}],
-   :data
-   {:document1
-    {:tt {:type "Text", :value "hhh"},
-     :title1
-     {:type "StructuredText",
-      :value [{:type "heading1", :text "Titre1", :spans []}]},
-     :content1
-     {:type "StructuredText",
-      :value
-      [{:type "paragraph",
-        :text "text text ff link e ddd",
-        :spans
-        [{:start 5, :end 6, :type "strong"}
-         {:start 6, :end 8, :type "strong"}
-         {:start 6, :end 8, :type "em"}
-         {:start 8, :end 9, :type "strong"}
-         {:start 10, :end 11, :type "em"}
-         {:start 11, :end 13, :type "em"}
-         {:start 11, :end 13, :type "strong"}
-         {:start 13,
-          :end 17,
-          :type "hyperlink",
-          :data
-          {:type "Link.document",
-           :value
-           {:document
-            {:id "Vq51byQAAEMxi9qn",
-             :type "document1",
-             :tags [],
-             :slug "titre1",
-             :uid "titre1"},
-            :isBroken false}}}
-         {:start 13, :end 17, :type "em"}
-         {:start 13, :end 17, :type "strong"}
-         {:start 17, :end 21, :type "strong"}],
-        :direction "rtl"}
-       {:type "o-list-item", :text "fff", :spans []}
-       {:type "o-list-item", :text "dffd", :spans []}
-       {:type "list-item", :text "ss", :spans []}
-       {:type "list-item", :text "ddd", :spans []}
-       {:type "embed",
-        :oembed
+    :uid "titre1",
+    :type "document1",
+    :href
+    "https://blogtemplateegr.cdn.prismic.io/api/documents/search?ref=VrYAvigAAEAAxiJO&q=%5B%5B%3Ad+%3D+at%28document.id%2C+%22Vq51byQAAEMxi9qn%22%29+%5D%5D",
+    :tags [],
+    :slugs ["titre1"],
+    :linked_documents
+    [{:id "Vq51byQAAEMxi9qn",
+      :tags [],
+      :type "document1",
+      :slug "titre1"}
+     {:id "Vq51byQAAEMxi9qn",
+      :tags [],
+      :type "document1",
+      :slug "titre1"}],
+    :data
+    {:document1
+     {:tt {:type "Text", :value "hhh"},
+      :title1
+      {:type "StructuredText",
+       :value [{:type "heading1", :text "Titre1", :spans []}]},
+      :content1
+      {:type "StructuredText",
+       :value
+       [{:type "paragraph",
+         :text "text text ff link e ddd",
+         :spans
+         [{:start 5, :end 6, :type "strong"}
+          {:start 6, :end 8, :type "strong"}
+          {:start 6, :end 8, :type "em"}
+          {:start 8, :end 9, :type "strong"}
+          {:start 10, :end 11, :type "em"}
+          {:start 11, :end 13, :type "em"}
+          {:start 11, :end 13, :type "strong"}
+          {:start 13,
+           :end 17,
+           :type "hyperlink",
+           :data
+           {:type "Link.document",
+            :value
+            {:document
+             {:id "Vq51byQAAEMxi9qn",
+              :type "document1",
+              :tags [],
+              :slug "titre1",
+              :uid "titre1"},
+             :isBroken false}}}
+          {:start 13, :end 17, :type "em"}
+          {:start 13, :end 17, :type "strong"}
+          {:start 17, :end 21, :type "strong"}],
+         :direction "rtl"}
+        {:type "o-list-item", :text "fff", :spans []}
+        {:type "o-list-item", :text "dffd", :spans []}
+        {:type "list-item", :text "ss", :spans []}
+        {:type "list-item", :text "ddd", :spans []}
+        {:type "embed",
+         :oembed
+         {:author_url "https://www.youtube.com/user/malakoffmederic",
+          :thumbnail_height 360,
+          :thumbnail_url
+          "https://i.ytimg.com/vi/H5N-xL2STKs/hqdefault.jpg",
+          :width 480,
+          :type "video",
+          :embed_url "https://youtu.be/H5N-xL2STKs",
+          :title "Campagne Malakoff Médéric 2014",
+          :provider_name "YouTube",
+          :author_name "Malakoff Médéric",
+          :thumbnail_width 480,
+          :version "1.0",
+          :provider_url "https://www.youtube.com/",
+          :height 270,
+          :html
+          "<iframe width=\"480\" height=\"270\" src=\"https://www.youtube.com/embed/H5N-xL2STKs?feature=oembed\" frameborder=\"0\" allowfullscreen></iframe>"}}
+        {:type "image",
+         :url
+         "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
+         :alt "",
+         :copyright "",
+         :dimensions {:width 960, :height 800}}
+        {:type "paragraph", :text "P2", :spans []}]},
+      :content2
+      {:type "Image",
+       :value
+       {:main
+        {:url
+         "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
+         :alt "",
+         :copyright "",
+         :dimensions {:width 1500, :height 500}},
+        :views
+        {:medium
+         {:url
+          "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
+          :alt "",
+          :copyright "",
+          :dimensions {:width 800, :height 250}},
+         :icon
+         {:url
+          "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
+          :alt "",
+          :copyright "",
+          :dimensions {:width 250, :height 250}}}}},
+      :link1
+      {:type "Link.document",
+       :value
+       {:document
+        {:id "Vq51byQAAEMxi9qn",
+         :type "document1",
+         :tags [],
+         :slug "titre1",
+         :uid "titre1"},
+        :isBroken false}},
+      :embed1
+      {:type "Embed",
+       :value
+       {:oembed
         {:author_url "https://www.youtube.com/user/malakoffmederic",
          :thumbnail_height 360,
          :thumbnail_url
@@ -591,67 +595,33 @@
          :provider_url "https://www.youtube.com/",
          :height 270,
          :html
-         "<iframe width=\"480\" height=\"270\" src=\"https://www.youtube.com/embed/H5N-xL2STKs?feature=oembed\" frameborder=\"0\" allowfullscreen></iframe>"}}
-       {:type "image",
-        :url
-        "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
-        :alt "",
-        :copyright "",
-        :dimensions {:width 960, :height 800}}
-       {:type "paragraph", :text "P2", :spans []}]},
-     :content2
-     {:type "Image",
-      :value
-      {:main
-       {:url
-        "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
-        :alt "",
-        :copyright "",
-        :dimensions {:width 1500, :height 500}},
-       :views
-       {:medium
-        {:url
-         "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
-         :alt "",
-         :copyright "",
-         :dimensions {:width 800, :height 250}},
-        :icon
-        {:url
-         "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
-         :alt "",
-         :copyright "",
-         :dimensions {:width 250, :height 250}}}}},
-     :link1
-     {:type "Link.image",
-      :value
-      {:image
-       {:name "star.gif",
-        :kind "image",
-        :url
-        "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
-        :size "627291",
-        :height "800",
-        :width "960"}}},
-     :embed1
-     {:type "Embed",
-      :value
-      {:oembed
-       {:author_url "https://www.youtube.com/user/malakoffmederic",
-        :thumbnail_height 360,
-        :thumbnail_url
-        "https://i.ytimg.com/vi/H5N-xL2STKs/hqdefault.jpg",
-        :width 480,
-        :type "video",
-        :embed_url "https://youtu.be/H5N-xL2STKs",
-        :title "Campagne Malakoff Médéric 2014",
-        :provider_name "YouTube",
-        :author_name "Malakoff Médéric",
-        :thumbnail_width 480,
-        :version "1.0",
-        :provider_url "https://www.youtube.com/",
-        :height 270,
-        :html
-        "<iframe width=\"480\" height=\"270\" src=\"https://www.youtube.com/embed/H5N-xL2STKs?feature=oembed\" frameborder=\"0\" allowfullscreen></iframe>"}}}}}})
+         "<iframe width=\"480\" height=\"270\" src=\"https://www.youtube.com/embed/H5N-xL2STKs?feature=oembed\" frameborder=\"0\" allowfullscreen></iframe>"}}},
+      :gallery
+      {:type "Group",
+       :value
+       [{:picture
+         {:type "Image",
+          :value
+          {:main
+           {:url
+            "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
+            :alt "",
+            :copyright "",
+            :dimensions {:width 960, :height 800}},
+           :views
+           {:regular
+            {:url
+             "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
+             :alt "",
+             :copyright "",
+             :dimensions {:width 800, :height 500}},
+            :icon
+            {:url
+             "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
+             :alt "",
+             :copyright "",
+             :dimensions {:width 50, :height 50}}}}},
+         :caption {:type "Text", :value "caption"}}]}}}})
 
   (as-html *1)
 
