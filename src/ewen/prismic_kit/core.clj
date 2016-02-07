@@ -2,34 +2,43 @@
   (:require [clj-http.client :as http-client]
             [clojure.set :refer [rename-keys]]
             [slingshot.slingshot :refer [try+ throw+]]
-            [clojure.pprint :refer [pp pprint]]))
+            [clojure.pprint :refer [pp pprint]])
+  (:import [java.time.format DateTimeFormatter]
+           [java.time LocalDate LocalDateTime]))
+
+(def date-formatter (DateTimeFormatter/ofPattern "yyy-MM-dd"))
+(def timestamp-formatter (DateTimeFormatter/ofPattern "yyy-MM-dd'T'HH:mm:ssZ"))
 
 (defn span-with-offset [span offset]
   (-> (update-in span [:start] - offset)
       (update-in [:end] - offset)))
 
-(defn split-by-hyperlinks [text spans]
+(defn split-by-main-span [text spans]
   (loop [start 0
          text-offset 0
          current-text (StringBuilder.)
          spans spans
          current-spans []
          splitted-texts []
-         hyperlink-end nil
-         hyperlink-data nil]
+         main-span nil]
     (if-let [{span-start :start span-end :end span-type :type :as span}
              (first spans)]
-      (cond (and (not hyperlink-end) (not= "hyperlink" span-type))
+      (cond (and (not main-span)
+                 (not= "hyperlink" span-type)
+                 (not= "label" span-type))
             (recur span-end
                    text-offset
                    (.append current-text (subs text start span-end))
                    (rest spans)
                    (conj current-spans (span-with-offset span text-offset))
                    splitted-texts
-                   nil nil)
-            (and (not hyperlink-end) (= "hyperlink" span-type))
+                   nil)
+            (and (not main-span)
+                 (or (= "hyperlink" span-type) (= "label" span-type)))
             (let [link-text (StringBuilder.
-                             (subs text span-start span-end))]
+                             (subs text span-start span-end))
+                  current-text (.append current-text
+                                        (subs text start span-start))]
               (recur span-end
                      span-start
                      link-text
@@ -37,25 +46,25 @@
                      []
                      (conj splitted-texts
                            {:text (.toString current-text)
-                            :spans current-spans
-                            :is-hyperlink false})
-                     span-end
-                     (:data span)))
-            (and hyperlink-end (= "hyperlink" span-type))
+                            :spans current-spans})
+                     span))
+            (and (:end main-span)
+                 (or (= "hyperlink" span-type) (= "label" span-type)))
             (throw (Exception. "Error while processing spans"))
-            (and hyperlink-end (not= "hyperlink" span-type))
-            (if (>= span-start hyperlink-end)
+            (and (:end main-span)
+                 (not= "hyperlink" span-type)
+                 (not= "label" span-type))
+            (if (>= span-start (:end main-span))
               (recur span-end
-                     hyperlink-end
-                     (StringBuilder. (subs text hyperlink-end span-end))
+                     (:end main-span)
+                     (StringBuilder. (subs text (:end main-span) span-end))
                      (rest spans)
-                     [(span-with-offset span hyperlink-end)]
+                     [(span-with-offset span (:end main-span))]
                      (conj splitted-texts
-                           {:text (.toString current-text)
-                            :spans current-spans
-                            :data hyperlink-data
-                            :is-hyperlink true})
-                     nil nil)
+                           (assoc main-span
+                                  :text (.toString current-text)
+                                  :spans current-spans))
+                     nil)
               (recur start
                      text-offset
                      current-text
@@ -63,15 +72,13 @@
                      (conj current-spans
                            (span-with-offset span text-offset))
                      splitted-texts
-                     hyperlink-end
-                     hyperlink-data)))
-      (conj splitted-texts {:text (.toString
-                                   (.append current-text
-                                            (subs text start
-                                                  (count text))))
-                            :spans current-spans
-                            :is-hyperlink (if hyperlink-end
-                                            true false)}))))
+                     main-span)))
+      (conj splitted-texts (assoc main-span
+                                  :text (.toString
+                                         (.append current-text
+                                                  (subs text start
+                                                        (count text))))
+                                  :spans current-spans)))))
 
 (defn next-spans [spans]
   (loop [spans spans
@@ -106,9 +113,10 @@
                  (.append (subs text start (:start (first n-spans))))
                  (.append (spans-as-html text n-spans))))))))
 
-(defn document-link-as-html [data link-resolver]
-  (format "<a href=\"%s\"></a>"
-          (if link-resolver (link-resolver data) "#")))
+(defn document-link-as-html [{:keys [slug] :as data} link-resolver]
+  (format "<a href=\"%s\">%s</a>"
+          (if link-resolver (link-resolver data) "#")
+          slug))
 
 (defn hyperlink-as-html [text spans data link-resolver]
   (case (:type data)
@@ -126,18 +134,28 @@
     "Link.image" (format "<a href=\"%s\">%s</a>"
                          (-> data :value :image :url)
                          (text-as-html* text spans))
+    "Link.file" (format "<a href=\"%s\">%s</a>"
+                        (-> data :value :file :url)
+                        (text-as-html* text spans))
     (throw (Exception. (str "Invalid link type: %s" (:type data))))))
+
+(defn label-span-as-html [text spans data]
+  (format "<span class=\"%s\">%s</span>"
+          (:label data)
+          (text-as-html* text spans)))
 
 (defn text-as-html
   ([text spans]
    (text-as-html text spans nil))
   ([text spans link-resolver]
-   (let [splitted-text (split-by-hyperlinks text spans)]
+   (let [splitted-text (split-by-main-span text spans)]
      (apply str (map
-                 (fn [{:keys [text spans is-hyperlink data]}]
-                   (if is-hyperlink
-                     (hyperlink-as-html text spans data link-resolver)
-                     (text-as-html* text spans)))
+                 (fn [{:keys [text spans type data]}]
+                   (cond (= "hyperlink" type)
+                         (hyperlink-as-html text spans data link-resolver)
+                         (= "label" type)
+                         (label-span-as-html text spans data)
+                     :else (text-as-html* text spans)))
                  splitted-text)))))
 
 (comment
@@ -147,7 +165,7 @@
                              {:start 5, :end 9, :type "em"}
                              {:start 11, :end 13, :type "em"}]))
 
-  (pprint (split-by-hyperlinks "text text ff link e ddd"
+  (pprint (split-by-main-span "text text ff link e ddd"
                                [{:start 5, :end 6, :type "strong"}
                                 {:start 6, :end 8, :type "strong"}
                                 {:start 6, :end 8, :type "em"}
@@ -163,6 +181,29 @@
                                 {:start 13, :end 17, :type "em"}
                                 {:start 13, :end 17, :type "strong"}
                                 {:start 18, :end 21, :type "strong"}]))
+
+  (pprint (split-by-main-span "P2ggg"
+                              [{:start 0, :end 1, :type "strong"}
+                               {:start 1, :end 2, :type "strong"}
+                               {:start 1, :end 2, :type "em"}
+                               {:start 2, :end 5, :type "label", :data {:label "author"}}
+                               {:start 2, :end 4, :type "strong"}
+                               {:start 2, :end 4, :type "em"}
+                               {:start 4, :end 5, :type "em"}]))
+
+  (pprint (split-by-main-span "P2ggg"
+                              [{:start 4,
+                                :end 5,
+                                :type "hyperlink",
+                                :data
+                                {:type "Link.file",
+                                 :value
+                                 {:file
+                                  {:name "test.txt",
+                                   :kind "document",
+                                   :url
+                                   "https://blogtemplateegr.cdn.prismic.io/blogtemplateegr%2F90263740-6c37-4fb9-be7e-f271963396e2_test.txt",
+                                   :size "5"}}}}]))
 
 
   (text-as-html "text text ff link e ddd"
@@ -194,62 +235,92 @@
 
 (declare as-html)
 
+(defn opt-attrs
+  ([label direction]
+   (let [opt-attrs (if label (format " class=\"%s\" " label) " ")]
+     (if direction
+       (format "%sdir=\"%s\" " opt-attrs direction)
+       opt-attrs)))
+  ([label direction other-class]
+   (if (nil? other-class)
+     (opt-attrs label direction)
+     (let [opt-attrs (if label
+                       (format " class=\"%s %s\" " other-class label)
+                       (format " class=\"%s\" " other-class))]
+       (if direction
+         (format "%sdir=\"%s\" " opt-attrs direction)
+         opt-attrs)))))
+
 (defn paragraph-as-html
   ([fragment]
    (paragraph-as-html fragment nil))
-  ([{:keys [text spans]} link-resolver]
-   (format "<p>%s</p>" (if link-resolver
-                         (text-as-html text spans link-resolver)
-                         (text-as-html text spans)))))
-(defn heading1-as-html
-  ([fragment]
-   (heading1-as-html fragment nil))
-  ([{:keys [text spans]} link-resolver]
-   (format "<h1>%s</h1>" (if link-resolver
-                           (text-as-html text spans link-resolver)
-                           (text-as-html text spans)))))
-(defn heading2-as-html
-  ([fragment]
-   (heading2-as-html fragment nil))
-  ([{:keys [text spans]} link-resolver]
-   (format "<h2>%s</h2>" (if link-resolver
-                           (text-as-html text spans link-resolver)
-                           (text-as-html text spans)))))
-(defn heading3-as-html
-  ([fragment]
-   (heading3-as-html fragment nil))
-  ([{:keys [text spans]} link-resolver]
-   (format "<h3>%s</h3>" (if link-resolver
-                           (text-as-html text spans link-resolver)
-                           (text-as-html text spans)))))
-(defn heading4-as-html
-  ([fragment]
-   (heading4-as-html fragment nil))
-  ([{:keys [text spans]} link-resolver]
-   (format "<h4>%s</h4>" (if link-resolver
-                           (text-as-html text spans link-resolver)
-                           (text-as-html text spans)))))
-(defn heading5-as-html
-  ([fragment]
-   (heading5-as-html fragment nil))
-  ([{:keys [text spans]} link-resolver]
-   (format "<h5>%s</h5>" (if link-resolver
-                           (text-as-html text spans link-resolver)
-                           (text-as-html text spans)))))
-(defn heading6-as-html
-  ([fragment]
-   (heading6-as-html fragment nil))
-  ([{:keys [text spans]} link-resolver]
-   (format "<h6>%s</h6>" (if link-resolver
-                           (text-as-html text spans link-resolver)
-                           (text-as-html text spans)))))
+  ([{:keys [text spans label direction]} link-resolver]
+   (format "<p%s>%s</p>"
+           (opt-attrs label direction)
+           (if link-resolver
+             (text-as-html text spans link-resolver)
+             (text-as-html text spans)))))
 
-(defn image-view-as-html [{:keys [url alt]}]
-  (format "<img src=\"%s\" alt=\"%s\">" url alt))
+(defn preformatted-as-html
+  ([fragment]
+   (preformatted-as-html fragment nil))
+  ([{:keys [text spans label direction]} link-resolver]
+   (format "<pre%s>%s</pre>"
+           (opt-attrs label direction)
+           (if link-resolver
+             (text-as-html text spans link-resolver)
+             (text-as-html text spans)))))
 
-(defn list-item-as-html [{:keys [text spans]} link-resolver]
+(defn heading-as-html
+  ([fragment level]
+   (heading-as-html fragment nil))
+  ([{:keys [text spans label direction]} level link-resolver]
+   (format "<h%s%s>%s</h%s>"
+           level
+           (opt-attrs label direction)
+           (if link-resolver
+             (text-as-html text spans link-resolver)
+             (text-as-html text spans))
+           level)))
+
+(defn geopoint-as-html [{:keys [latitude longitude]}]
+  (format "<div class=\"geopoint\"><span class=\"latitude\">%s</span><span class=\"longitude\">%s</span></div>" latitude longitude))
+
+(defn image-view-as-html [{:keys [url alt dimensions
+                                  label direction linkTo]}
+                          link-resolver]
+  (let [view-html
+        (format "<img src=\"%s\" alt=\"%s\" width=\"%s\" height=\"%s\"/>"
+                url alt (:width dimensions) (:height dimensions))
+        link (when linkTo
+               (case (:type linkTo)
+                 "Link.image" (-> linkTo :value :image :url)
+                 "Link.web" (-> linkTo :value :url)
+                 "Link.file" (-> linkTo :value :file :url)
+                 "Link.document" (if link-resolver
+                                   (let [{:keys [document is-broken]}
+                                         (:value linkTo)]
+                                     (link-resolver
+                                      (assoc
+                                       document :is-broken is-broken)))
+                                   "#")))
+        link-html
+        (if linkTo
+          (format "<a href=\"%s\">%s</a>" link view-html)
+          view-html)]
+    (if (or label direction)
+      (format "<p%s>%s</p>"
+              (opt-attrs label direction "block-img") link-html)
+      link-html)))
+
+(defn embed-as-html [{:keys [html type embed_url provider_name
+                             label direction]}]
+  (format "<div%sdata-oembed=\"%s\" data-oembed-type=\"%s\" data-oembed-provider=\"%s\">%s</div>"
+          (opt-attrs label direction) embed_url type provider_name html))
+
+(defn list-item-as-html [{:keys [text spans label direction]} link-resolver]
   (let [list-html (StringBuilder.)]
-    (.append list-html "<li>")
+    (.append list-html (format "<li%s>" (opt-attrs label direction)))
     (.append list-html (text-as-html text spans link-resolver))
     (.append list-html "</li>")
     (.toString list-html)))
@@ -282,10 +353,8 @@
    (group-as-html group nil))
   ([group link-resolver]
    (let [group-html (StringBuilder.)]
-     (.append group-html "<div>")
      (doseq [group-item group]
        (.append group-html (as-html group-item link-resolver)))
-     (.append group-html "</div>")
      (.toString group-html))))
 
 (defn slice-as-html
@@ -293,10 +362,14 @@
    (slice-as-html slice nil))
   ([slice link-resolver]
    (let [slice-html (StringBuilder.)]
-     (.append slice-html "<div>")
      (doseq [slice-item slice]
-       (.append slice-html (as-html slice-item link-resolver)))
-     (.append slice-html "</div>")
+       (let [slice-type (:slice_type (meta slice-item))
+             slice-label (:slice_label (meta slice-item))]
+         (.append slice-html (format "<div%s data-slicetype=\"%s\">"
+                                     (opt-attrs slice-label nil "slice")
+                                     slice-type))
+         (.append slice-html (as-html slice-item link-resolver))
+         (.append slice-html "</div>")))
      (.toString slice-html))))
 
 (defn document-as-html
@@ -316,29 +389,42 @@
      (case type
        ::document (document-as-html fragment link-resolver)
        ::structured-text (structured-text-as-html fragment link-resolver)
-       ::text (format "<p>%s</p>"
+       ::text (format "<span class=\"text\">%s</span>"
                       (text-as-html* (:text fragment) (:spans fragment)))
-       ::image (image-view-as-html (:main fragment))
-       ::embed (:html fragment)
+       ::number (format "<span class=\"number\">%s</span>"
+                        (:value fragment))
+       ::color (format "<span class=\"color\">%s</span>" (:value fragment))
+       ::date (format "<time>%s</time>" (:value fragment))
+       ::range (format "<span class=\"number\">%s</span>" (:value fragment))
+       ::select (format "<span class=\"text\">%s</span>" (:value fragment))
+       ::timestamp (format "<time>%s</time>" (:value fragment))
+       ::geopoint (geopoint-as-html fragment)
+       ::image (image-view-as-html (:main fragment) link-resolver)
+       ::embed (embed-as-html fragment)
        ::link-document (document-link-as-html fragment link-resolver)
-       ::link-web (format "<a href=\"%s\"></a>" (:url fragment))
-       ::link-image (format "<a href=\"%s\"></a>" (:url fragment))
+       ::link-web (format "<a href=\"%s\">%s</a>"
+                          (:url fragment) (:url fragment))
+       ::link-image (format "<img src=\"%s\" alt=\"%s\"/>"
+                            (:url fragment) (:alt fragment))
+       ::link-file (format "<a href=\"%s\">%s</a>"
+                           (:url fragment) (:name fragment))
        ::group (group-as-html fragment link-resolver)
        ;;group-items and documents have the same structure
        ::group-item (document-as-html fragment link-resolver)
        ::slice (slice-as-html fragment link-resolver)
        ::paragraph (paragraph-as-html fragment link-resolver)
-       ::heading1 (heading1-as-html fragment link-resolver)
-       ::heading2 (heading2-as-html fragment link-resolver)
-       ::heading3 (heading3-as-html fragment link-resolver)
-       ::heading4 (heading4-as-html fragment link-resolver)
-       ::heading5 (heading5-as-html fragment link-resolver)
-       ::heading6 (heading6-as-html fragment link-resolver)
+       ::heading1 (heading-as-html fragment 1 link-resolver)
+       ::heading2 (heading-as-html fragment 2 link-resolver)
+       ::heading3 (heading-as-html fragment 3 link-resolver)
+       ::heading4 (heading-as-html fragment 4 link-resolver)
+       ::heading5 (heading-as-html fragment 5 link-resolver)
+       ::heading6 (heading-as-html fragment 6 link-resolver)
        ::o-list (o-list-as-html fragment link-resolver)
        ::o-list-item (list-item-as-html fragment link-resolver)
        ::list (list-as-html fragment link-resolver)
        ::list-item (list-item-as-html fragment link-resolver)
-       ::image-view (image-view-as-html fragment)
+       ::image-view (image-view-as-html fragment link-resolver)
+       ::preformatted (preformatted-as-html fragment)
        (throw (Exception.
                (str "Unexpected type while generating HTML: " type)))))))
 
@@ -394,11 +480,15 @@
                             (partial
                              structured-text-add-list-item context)]
                         (structured-text-add-list-item state value))
-          "embed" (->> (with-meta (:oembed value)
-                         (assoc context ::type ::embed))
-                       (conj state))
+          "embed" (conj state
+                        (-> (:oembed value)
+                            (merge (dissoc value :type :oembed))
+                            (with-meta (assoc context ::type ::embed))))
           "image" (->> (parse-image context {:main (dissoc value :type)})
                        (conj state))
+          "preformatted" (->> (with-meta (dissoc value :type)
+                                (assoc context ::type ::preformatted))
+                              (conj state))
           "paragraph" (->> (with-meta (dissoc value :type)
                              (assoc context ::type ::paragraph))
                            (conj state))
@@ -460,9 +550,26 @@
   (case type
     "StructuredText" (parse-structured-text context value)
     "Image" (parse-image context value)
-    "Embed" (with-meta (:oembed value) (assoc context ::type ::embed))
+    "Embed" (-> (:oembed value)
+                (merge (dissoc value :type :oembed))
+                (with-meta (assoc context ::type ::embed)))
     "Text" (with-meta {:text value :spans []}
              (assoc context ::type ::text))
+    "Number" (with-meta {:value value}
+               (assoc context ::type ::number))
+    "Color" (with-meta {:value value}
+              (assoc context ::type ::color))
+    "Date" (with-meta {:value (LocalDate/parse value date-formatter)}
+             (assoc context ::type ::date))
+    "Range" (with-meta {:value value}
+              (assoc context ::type ::range))
+    "Select" (with-meta {:value value}
+               (assoc context ::type ::select))
+    "Timestamp" (with-meta {:value (LocalDateTime/parse
+                                    value timestamp-formatter)}
+                  (assoc context ::type ::timestamp))
+    "GeoPoint" (with-meta value
+                 (assoc context ::type ::geopoint))
     "Link.document" (-> (:document value)
                         (merge (dissoc value :document))
                         (rename-keys {:isBroken :is-broken})
@@ -471,6 +578,8 @@
     "Link.web" (with-meta value (assoc context ::type ::link-web))
     "Link.image" (with-meta (:image value)
                    (assoc context ::type ::link-image))
+    "Link.file" (with-meta (:file value)
+                  (assoc context ::type ::link-file))
     "Group" (parse-group context value)
     "SliceZone" (parse-slice context value)
     (throw
@@ -492,38 +601,6 @@
     (-> (into {} (map parse-field document))
         (with-meta context))))
 
-(defn api [{:keys [url token]}]
-  (let [{:keys [status body] :as resp}
-        (http-client/get url
-                         {:as :json
-                          :query-params {"access_token" token}})]
-    (if (= 200 status)
-      body
-      (throw+ resp "Received HTTP status %s" status))))
-
-(defn master-ref [{:keys [url token]}]
-  (let [{:keys [status body] :as resp}
-        (http-client/get url
-                         {:as :json
-                          :query-params {"access_token" token}})]
-    (if (= 200 status)
-      (-> (filter :isMasterRef (:refs body))
-          first :ref)
-      (throw+ resp "Received HTTP status %s" status))))
-
-(defn search
-  ([options] (search options nil))
-  ([{:keys [url token ref]} q]
-   (let [{:keys [status body] :as resp}
-         (http-client/get (str url "/documents/search")
-                          {:as :json
-                           :query-params (merge {"access_token" token
-                                                 "ref" ref}
-                                                (when q {"q" q}))})]
-     (if (= 200 status)
-       body
-       (throw+ resp "Received HTTP status %s" status)))))
-
 (comment
 
   (parse-document
@@ -531,7 +608,7 @@
    :uid "titre1",
    :type "document1",
    :href
-   "https://blogtemplateegr.cdn.prismic.io/api/documents/search?ref=VrZktigAADgAyHll&q=%5B%5B%3Ad+%3D+at%28document.id%2C+%22Vq51byQAAEMxi9qn%22%29+%5D%5D",
+   "https://blogtemplateegr.cdn.prismic.io/api/documents/search?ref=Vreu4CgAAD4A0DJY&q=%5B%5B%3Ad+%3D+at%28document.id%2C+%22Vq51byQAAEMxi9qn%22%29+%5D%5D",
    :tags [],
    :slugs ["titre1"],
    :linked_documents
@@ -549,10 +626,53 @@
      :slug "titre1"}],
    :data
    {:document1
-    {:tt {:type "Text", :value "hhh"},
-     :title1
-     {:type "StructuredText",
-      :value [{:type "heading1", :text "Titre1", :spans []}]},
+    {:content2
+     {:type "Image",
+      :value
+      {:main
+       {:url
+        "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
+        :alt "",
+        :copyright "",
+        :dimensions {:width 1500, :height 500}},
+       :views
+       {:medium
+        {:url
+         "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
+         :alt "",
+         :copyright "",
+         :dimensions {:width 800, :height 250}},
+        :icon
+        {:url
+         "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
+         :alt "",
+         :copyright "",
+         :dimensions {:width 250, :height 250}}}}},
+     :timestamp1
+     {:type "Timestamp", :value "2016-03-02T23:00:00+0000"},
+     :location1
+     {:type "GeoPoint",
+      :value {:latitude 66.0893642704709, :longitude -0.703125}},
+     :embed1
+     {:type "Embed",
+      :value
+      {:oembed
+       {:author_url "https://www.youtube.com/user/malakoffmederic",
+        :thumbnail_height 360,
+        :thumbnail_url
+        "https://i.ytimg.com/vi/H5N-xL2STKs/hqdefault.jpg",
+        :width 480,
+        :type "video",
+        :embed_url "https://youtu.be/H5N-xL2STKs",
+        :title "Campagne Malakoff Médéric 2014",
+        :provider_name "YouTube",
+        :author_name "Malakoff Médéric",
+        :thumbnail_width 480,
+        :version "1.0",
+        :provider_url "https://www.youtube.com/",
+        :height 270,
+        :html
+        "<iframe width=\"480\" height=\"270\" src=\"https://www.youtube.com/embed/H5N-xL2STKs?feature=oembed\" frameborder=\"0\" allowfullscreen></iframe>"}}},
      :content1
      {:type "StructuredText",
       :value
@@ -587,6 +707,11 @@
        {:type "o-list-item", :text "dffd", :spans []}
        {:type "list-item", :text "ss", :spans []}
        {:type "list-item", :text "ddd", :spans []}
+       {:type "preformatted",
+        :text "hhhhddddddd",
+        :spans [],
+        :label "ingredient",
+        :direction "rtl"}
        {:type "embed",
         :oembed
         {:author_url "https://www.youtube.com/user/malakoffmederic",
@@ -604,66 +729,39 @@
          :provider_url "https://www.youtube.com/",
          :height 270,
          :html
-         "<iframe width=\"480\" height=\"270\" src=\"https://www.youtube.com/embed/H5N-xL2STKs?feature=oembed\" frameborder=\"0\" allowfullscreen></iframe>"}}
+         "<iframe width=\"480\" height=\"270\" src=\"https://www.youtube.com/embed/H5N-xL2STKs?feature=oembed\" frameborder=\"0\" allowfullscreen></iframe>"},
+        :label "author",
+        :direction "rtl"}
        {:type "image",
         :url
         "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
         :alt "",
         :copyright "",
-        :dimensions {:width 960, :height 800}}
-       {:type "paragraph", :text "P2", :spans []}]},
-     :content2
-     {:type "Image",
-      :value
-      {:main
-       {:url
-        "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
-        :alt "",
-        :copyright "",
-        :dimensions {:width 1500, :height 500}},
-       :views
-       {:medium
-        {:url
-         "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
-         :alt "",
-         :copyright "",
-         :dimensions {:width 800, :height 250}},
-        :icon
-        {:url
-         "https://wroomdev.s3.amazonaws.com/tutoblanktemplate%2F97109f41-140e-4dc9-a2c8-96fb10f14051_star.gif",
-         :alt "",
-         :copyright "",
-         :dimensions {:width 250, :height 250}}}}},
-     :link1
-     {:type "Link.document",
-      :value
-      {:document
-       {:id "Vq51byQAAEMxi9qn",
-        :type "document1",
-        :tags [],
-        :slug "titre1",
-        :uid "titre1"},
-       :isBroken false}},
-     :embed1
-     {:type "Embed",
-      :value
-      {:oembed
-       {:author_url "https://www.youtube.com/user/malakoffmederic",
-        :thumbnail_height 360,
-        :thumbnail_url
-        "https://i.ytimg.com/vi/H5N-xL2STKs/hqdefault.jpg",
-        :width 480,
-        :type "video",
-        :embed_url "https://youtu.be/H5N-xL2STKs",
-        :title "Campagne Malakoff Médéric 2014",
-        :provider_name "YouTube",
-        :author_name "Malakoff Médéric",
-        :thumbnail_width 480,
-        :version "1.0",
-        :provider_url "https://www.youtube.com/",
-        :height 270,
-        :html
-        "<iframe width=\"480\" height=\"270\" src=\"https://www.youtube.com/embed/H5N-xL2STKs?feature=oembed\" frameborder=\"0\" allowfullscreen></iframe>"}}},
+        :dimensions {:width 960, :height 800},
+        :linkTo
+        {:type "Link.image",
+         :value
+         {:image
+          {:name "delete-button.png",
+           :kind "image",
+           :url
+           "https://blogtemplateegr.cdn.prismic.io/blogtemplateegr%2F80358f59-e73d-4f26-8896-485b9fc98b01_delete-button.png",
+           :size "1300",
+           :height "30",
+           :width "30"}}},
+        :label "author",
+        :direction "rtl"}
+       {:type "paragraph",
+        :text "P2ggg",
+        :spans
+        [{:start 0, :end 1, :type "strong"}
+         {:start 1, :end 2, :type "strong"}
+         {:start 1, :end 2, :type "em"}
+         {:start 2, :end 5, :type "label", :data {:label "author"}}
+         {:start 2, :end 4, :type "strong"}
+         {:start 2, :end 4, :type "em"}
+         {:start 4, :end 5, :type "em"}]}]},
+     :tt {:type "Text", :value "hhh"},
      :gallery
      {:type "Group",
       :value
@@ -713,12 +811,28 @@
             :copyright "",
             :dimensions {:width 50, :height 50}}}}},
         :caption {:type "Text", :value "caption2"}}]},
+     :select1 {:type "Select", :value "opt1"},
+     :range1 {:type "Range", :value "19"},
+     :link1
+     {:type "Link.document",
+      :value
+      {:document
+       {:id "Vq51byQAAEMxi9qn",
+        :type "document1",
+        :tags [],
+        :slug "titre1",
+        :uid "titre1"},
+       :isBroken false}},
+     :title1
+     {:type "StructuredText",
+      :value
+      [{:type "heading1", :text "Titre1", :spans [], :label "quote"}]},
      :body
      {:type "SliceZone",
       :value
       [{:type "Slice",
         :slice_type "featured-items",
-        :slice_label nil,
+        :slice_label "full-featured",
         :value
         {:type "Group",
          :value
@@ -747,12 +861,47 @@
               :tags [],
               :slug "titre1",
               :uid "titre1"},
-             :isBroken false}}}]}}]}}}})
+             :isBroken false}}}]}}]},
+     :color1 {:type "Color", :value "#583535"},
+     :date1 {:type "Date", :value "2016-02-02"},
+     :number1 {:type "Number", :value 12.0}}}})
 
   (as-html *1)
 
 
   )
+
+(defn api [{:keys [url token]}]
+  (let [{:keys [status body] :as resp}
+        (http-client/get url
+                         {:as :json
+                          :query-params {"access_token" token}})]
+    (if (= 200 status)
+      body
+      (throw+ resp "Received HTTP status %s" status))))
+
+(defn master-ref [{:keys [url token]}]
+  (let [{:keys [status body] :as resp}
+        (http-client/get url
+                         {:as :json
+                          :query-params {"access_token" token}})]
+    (if (= 200 status)
+      (-> (filter :isMasterRef (:refs body))
+          first :ref)
+      (throw+ resp "Received HTTP status %s" status))))
+
+(defn search
+  ([options] (search options nil))
+  ([{:keys [url token ref]} q]
+   (let [{:keys [status body] :as resp}
+         (http-client/get (str url "/documents/search")
+                          {:as :json
+                           :query-params (merge {"access_token" token
+                                                 "ref" ref}
+                                                (when q {"q" q}))})]
+     (if (= 200 status)
+       body
+       (throw+ resp "Received HTTP status %s" status)))))
 
 (comment
 
