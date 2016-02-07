@@ -428,6 +428,8 @@
        (throw (Exception.
                (str "Unexpected type while generating HTML: " type)))))))
 
+(def ^:dynamic *fragments* #{})
+
 (defn structured-text-add-list-item
   [{path ::path :as context} state {:keys [type] :as value}]
   (let [maybe-list (peek state)
@@ -446,17 +448,23 @@
       (or (and (= ::list-item item-type) (= maybe-list-type ::list))
           (and (= ::o-list-item item-type) (= maybe-list-type ::o-list)))
       (let [path (conj path (count maybe-list))
-            context (assoc context ::type item-type ::path path)]
-        (->> (conj maybe-list (with-meta value context))
+            context (assoc context ::type item-type ::path path)
+            value (with-meta value context)]
+        (set! *fragments* (conj *fragments* value))
+        (->> (conj maybe-list value)
              (conj (pop state))))
       :else
-      (let [context (assoc context ::type item-type ::path (conj path 0))]
-        (conj state (with-meta [(with-meta value context)]
+      (let [context (assoc context ::type item-type ::path (conj path 0))
+            value (with-meta value context)]
+        (set! *fragments* (conj *fragments* value))
+        (conj state (with-meta [value]
                       (assoc context ::type list-type)))))))
 
 (defn parse-view [context [view-name view]]
-  (let [context (update-in context [::path] conj view-name)]
-    [view-name (with-meta view (assoc context ::type ::image-view))]))
+  (let [context (update-in context [::path] conj view-name)
+        view (with-meta view (assoc context ::type ::image-view))]
+    (set! *fragments* (conj *fragments* view))
+    [view-name view]))
 
 (defn parse-image [context {:keys [views] :as image}]
   (let [image (-> (dissoc image :views)
@@ -466,7 +474,7 @@
       (assoc context ::type ::image))))
 
 (defn structured-text-reducer
-  [{document ::document path ::path :as context}
+  [{path ::path :as context}
    state {:keys [type] :as value}]
   (let [index (count state)
         {path ::path :as context} (update-in context [::path] conj index)
@@ -525,9 +533,11 @@
 
 (defn parse-group-item [context index value]
   (let [context (update-in context [::path] conj index)
-        parse-field (partial parse-field context)]
-    (-> (into {} (map parse-field value))
-        (with-meta (assoc context ::type ::group-item)))))
+        parse-field (partial parse-field context)
+        group-item (-> (into {} (map parse-field value))
+                       (with-meta (assoc context ::type ::group-item)))]
+    (set! *fragments* (conj *fragments* group-item))
+    group-item))
 
 (defn parse-group [context value]
   (let [parse-group-item (partial parse-group-item context)]
@@ -537,9 +547,11 @@
 (defn parse-slice-item [context index {:keys [value] :as slice-item}]
   (let [context (update-in context [::path] conj index)
         parse-field* (partial parse-field* context)
-        other-meta (dissoc slice-item :type :value)]
-    (-> (parse-field* value)
-        (vary-meta merge other-meta))))
+        other-meta (dissoc slice-item :type :value)
+        slice-item (-> (parse-field* value)
+                       (vary-meta merge other-meta))]
+    (set! *fragments* (conj *fragments* slice-item))
+    slice-item))
 
 (defn parse-slice [context value]
   (let [parse-slice-item (partial parse-slice-item context)]
@@ -590,16 +602,27 @@
   (let [{path ::path :as context}
         (update-in context [::path] conj field-name)
         field (parse-field* context field)]
+    (when (= ::structured-text (::type (meta field)))
+      (set! *fragments* (apply conj *fragments* field)))
+    (set! *fragments* (conj *fragments* field))
     [field-name field]))
 
 (defn parse-document [{:keys [type data] :as document}]
-  (let [document (get data (keyword type))
-        context (-> (dissoc document :data)
-                    (assoc ::type ::document))
-        parse-field (partial parse-field {::document document
-                                          ::path []})]
-    (-> (into {} (map parse-field document))
-        (with-meta context))))
+  (binding [*fragments* #{}]
+    (let [document (get data (keyword type))
+          context (-> (dissoc document :data)
+                      (assoc ::type ::document))
+          ;; Using a ref in order to be able to introduce a circular
+          ;; reference: All fragments will refer to the document they
+          ;; are defined in
+          document-ref (atom nil)
+          parse-field (partial parse-field {::document document-ref
+                                            ::path []})
+          document (-> (into {} (map parse-field document))
+                       (with-meta context))
+          document (vary-meta document assoc ::fragments *fragments*)]
+      (reset! document-ref document)
+      document)))
 
 (comment
 
